@@ -61,7 +61,7 @@ class App(TkinterDnD.Tk):
 
         self.make_widgets()
 
-        self.geometry("1052x665")
+        self.geometry("1052x695")
 
         # Restore the saved company / delay / extra-tabs into their widgets.
         self.company_selector.set(saved_company)
@@ -75,6 +75,10 @@ class App(TkinterDnD.Tk):
 
         self._autoentry_thread = None
         self._autoentry_stop = threading.Event()
+
+        # Latest-release info once a check finds a newer version; drives the
+        # clickable version label (bottom-right of the AutoPaste tab).
+        self._pending_update = None
 
         keyboard.add_hotkey('F2', lambda: self.after(10, self.paste_and_copy_next))
         keyboard.add_hotkey('F4', self.toggle_auto_entry)
@@ -353,6 +357,23 @@ class App(TkinterDnD.Tk):
         # )
         # self.ref_id_label.grid(row=3, column=1, pady=5, padx=5)
 
+        #########################
+        # VERSION STATUS LABEL  #
+        #########################
+
+        # Bottom-right of the AutoPaste tab. Text/color/click behavior are set
+        # by the update-check methods; start_update_check() is called after the
+        # window is built.
+        self.version_status = ttk.Label(
+            self.autopaste_tab,
+            text=f"v{__version__}",
+            foreground="white",
+            font=("Helvetica", 9),
+            cursor="hand2",
+        )
+        self.version_status.grid(row=3, column=2, sticky="se", padx=8, pady=6)
+        self.version_status.bind("<Button-1>", self.on_version_status_click)
+
         ####################
         # RIGHT CLICK MENU #
         ####################
@@ -431,7 +452,7 @@ class App(TkinterDnD.Tk):
             status, result, message = parse_dean(raw)
         elif company == "Dean S4S":
             status, result, message = parse_dean_s4s(raw)
-        elif company == "P Cabinetry":
+        elif company == "Peters Cabinetry":
             status, result, message = parse_p_cabinetry(raw)
         else:
             status, result, message = "error", None, "Unknown company selected"
@@ -545,24 +566,74 @@ class App(TkinterDnD.Tk):
         save_settings(self.settings)
         self.destroy()
 
-    def start_update_check(self):
-        """Kick off the GitHub release check on a daemon thread (non-blocking)."""
-        if not is_frozen():
-            return  # running from source: nothing to update
-        threading.Thread(target=self._update_check_worker, daemon=True).start()
-
-    def _update_check_worker(self):
+    def start_update_check(self, auto_prompt=True):
         """
-        Background: ask GitHub for the latest release. If it's newer, hand the
-        result back to the UI thread to prompt (dialogs must run on the main
-        thread). Silent on any failure (offline, no release, same version).
+        Kick off the GitHub release check on a daemon thread (non-blocking) and
+        reflect the result in the bottom-right version label. auto_prompt=True
+        also pops the install dialog when an update is found (used on launch).
+
+        From source there is nothing to update, so we just label it a dev build.
+        """
+        if not is_frozen():
+            self.version_status.config(
+                text=f"v{__version__} — dev build", foreground="white"
+            )
+            return
+        self.version_status.config(
+            text="Checking for updates…", foreground="white"
+        )
+        # No update is pending while a check is in flight; clicking does nothing.
+        self._pending_update = None
+        threading.Thread(
+            target=self._update_check_worker, args=(auto_prompt,), daemon=True
+        ).start()
+
+    def _update_check_worker(self, auto_prompt):
+        """
+        Background: ask GitHub for the latest release, then hand the result to
+        the UI thread to update the label (and optionally prompt). Never raises;
+        get_latest_release() returns None on any failure (offline, no release).
         """
         latest = get_latest_release()
+        self.after(0, lambda: self._apply_update_status(latest, auto_prompt))
+
+    def _apply_update_status(self, latest, auto_prompt):
+        """UI thread: set the version label from the check result."""
         if not latest:
+            # Couldn't reach GitHub (offline / rate-limited / no release yet).
+            self._pending_update = None
+            self.version_status.config(
+                text=f"v{__version__} — offline", foreground="white"
+            )
             return
+
         tag, asset_url = latest
         if is_newer(tag):
-            self.after(0, lambda: self._prompt_update(tag, asset_url))
+            self._pending_update = (tag, asset_url)
+            self.version_status.config(
+                text=f"⤓ Update available: {tag}", foreground="#f39c12"  # orange
+            )
+            if auto_prompt:
+                self._prompt_update(tag, asset_url)
+        else:
+            self._pending_update = None
+            self.version_status.config(
+                text=f"✓ v{__version__} — up to date", foreground="#00bc8c"  # green
+            )
+
+    def on_version_status_click(self, event=None):
+        """
+        Click the version label: if an update is pending, open the install
+        prompt; otherwise re-run the check (e.g. after reconnecting). No-op from
+        source and while a check is already in flight.
+        """
+        if not is_frozen():
+            return
+        if self._pending_update:
+            tag, asset_url = self._pending_update
+            self._prompt_update(tag, asset_url)
+        else:
+            self.start_update_check(auto_prompt=False)
 
     def _prompt_update(self, tag, asset_url):
         """UI thread: 'Update available — install now?'. On Yes, do the swap."""
@@ -740,7 +811,7 @@ class App(TkinterDnD.Tk):
         self.settings["selected_company"] = company  # persist the choice
 
         # Companies that need auto-entry widgets
-        show_autoentry = company in ["Greenfield/Corsi", "Legacy", "MW Residential", "Dean Cabinetry", "P Cabinetry"]
+        show_autoentry = company in ["Greenfield/Corsi", "Legacy", "MW Residential", "Dean Cabinetry", "Peters Cabinetry"]
 
         if show_autoentry:
             # Show all widgets
