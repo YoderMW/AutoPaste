@@ -1,0 +1,39 @@
+name: Build & Release
+
+# Pushing a version tag (e.g. v2.0.0) builds the exe and publishes a Release.
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write   # allows the workflow to create the Release
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r AutoPasteV1.1/requirements.txt
+          pip install pyinstaller
+
+      - name: Stamp version from tag
+        shell: bash
+        run: echo "__version__ = \"${GITHUB_REF_NAME#v}\"" > AutoPasteV1.1/version.py
+
+      - name: Build exe
+        working-directory: AutoPasteV1.1
+        run: pyinstaller AutoPaste.spec
+
+      - name: Publish Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: AutoPasteV1.1/dist/AutoPaste.exe

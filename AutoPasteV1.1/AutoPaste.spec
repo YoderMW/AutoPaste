@@ -1,7 +1,12 @@
 # -*- mode: python ; coding: utf-8 -*-
 from PyInstaller.utils.hooks import collect_all
 
-datas = []
+# Bundle the first-run seed and the app icon inside the exe. resource_path()
+# in paths.py finds them at runtime via sys._MEIPASS.
+datas = [
+    ('settings.json', '.'),
+    ('AutoPaste.ico', '.'),
+]
 binaries = []
 hiddenimports = []
 tmp_ret = collect_all('tkinterdnd2')
@@ -46,4 +51,5 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+    icon='AutoPaste.ico',
 )

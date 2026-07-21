@@ -10,6 +10,7 @@ from ttkbootstrap.scrolled import ScrolledText
 from ttkbootstrap.constants import *
 
 from version import __version__
+from paths import resource_path
 from settings import load_settings, save_settings
 from updater import (
     is_frozen,
@@ -41,6 +42,13 @@ class App(TkinterDnD.Tk):
         self.style = ttk.Style("superhero")
 
         self.title(f"AutoPaste v{__version__}")
+
+        # Window / taskbar icon. Wrapped so a missing file (e.g. running from
+        # source before the icon exists) never crashes startup.
+        try:
+            self.iconbitmap(resource_path("AutoPaste.ico"))
+        except Exception:
+            pass
 
         # Load persisted settings before building widgets (load_keywords reads
         # self.settings["keywords"] while the PDF tab is being constructed).
@@ -223,7 +231,7 @@ class App(TkinterDnD.Tk):
                 "Ruffino Boxes",
                 "Dean Cabinetry",
                 "Dean S4S",
-                "P Cabinetry"
+                "Peters Cabinetry"
             ],
             state="readonly",
         )
