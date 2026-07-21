@@ -6,6 +6,7 @@ import os
 import fitz  # PyMuPDF library for PDF manipulation
 import json
 from tkinterdnd2 import DND_FILES, TkinterDnD
+from settings import save_settings
 
 ############################
 # PDF HIGHLIGHTER TAB GUI #
@@ -19,8 +20,10 @@ def build_pdf_highlighter_tab(app, parent):
     parent -> The PDF Highlighter tab frame
     """
 
-    # Initialize data storage on app instance
-    app.keywords_list = []
+    # Initialize data storage on app instance.
+    # keywords_list IS the list inside the shared settings dict, so editing it
+    # and saving settings keeps keywords, company and delay in one file.
+    app.keywords_list = app.settings["keywords"]
     app.pdf_files_list = []
     app.selected_color = "#FFFF00"  # Default yellow
     app.create_copy_var = ttk.BooleanVar(value=True)  # Default to creating a copy
@@ -605,36 +608,23 @@ def show_status(app, message, color):
 
 def save_keywords(app):
     """
-    Saves the keyword list to a JSON file
+    Persist the keyword list. Keywords live inside the shared settings dict,
+    so this writes the whole settings.json (keywords + company + delay).
     """
-    try:
-        # Open (or create) the keywords.json file in write mode
-        with open('keywords.json', 'w') as file:
-            # Convert the keywords list to JSON format and write it to the file
-            # indent=4 makes the file human-readable (nicely formatted)
-            json.dump(app.keywords_list, file, indent=4)
-    except Exception as e:
-        # If something goes wrong, show an error (but don't crash)
-        print(f"Error saving keywords: {e}")
+    save_settings(app.settings)
 
 def load_keywords(app):
     """
-    Loads the keyword list from a JSON file.
+    Refresh the keyword display from the already-loaded settings.
+
+    The keywords were loaded from settings.json at startup (app.keywords_list
+    is the same list object as app.settings["keywords"]), so there is no file
+    to read here -- just show what's in memory.
     """
     try:
-        # Check if the keywords.json file exists
-        if os.path.exists('keywords.json'):
-            # Open the file in read mode
-            with open('keywords.json', 'r') as file:
-                # Read the JSON data and convert it back to a Python list
-                app.keywords_list = json.load(file)
-
-            # Update the display to show the loaded keywords
-            update_keyword_display(app)
-
-            # Show how many keywords were loaded
-            if app.keywords_list:
-                show_status(app, f"Loaded {len(app.keywords_list)} saved keyword(s)", "green")
+        update_keyword_display(app)
+        if app.keywords_list:
+            show_status(app, f"Loaded {len(app.keywords_list)} saved keyword(s)", "green")
     except Exception as e:
         # If something goes wrong, show an error (but don't crash)
         print(f"Error loading keywords: {e}")

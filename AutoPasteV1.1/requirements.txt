@@ -1,0 +1,5 @@
+ttkbootstrap==1.20.4
+keyboard==0.13.5
+pyperclip==1.11.0
+tkinterdnd2==0.6.2
+pymupdf==1.28.0

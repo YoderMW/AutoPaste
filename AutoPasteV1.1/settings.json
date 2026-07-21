@@ -1,0 +1,51 @@
+{
+    "keywords": [
+        {
+            "keyword": "Cab Door",
+            "color": "#80ff80"
+        },
+        {
+            "keyword": "Drw Frnt",
+            "color": "#80ffff"
+        },
+        {
+            "keyword": "Frame",
+            "color": "#ff8080"
+        },
+        {
+            "keyword": "1-1/2\"",
+            "color": "#ff80ff"
+        },
+        {
+            "keyword": "2-1/4 ALL",
+            "color": "#ff8040"
+        },
+        {
+            "keyword": "2-Panel",
+            "color": "#ff00ff"
+        },
+        {
+            "keyword": "L/S",
+            "color": "#8080ff"
+        },
+        {
+            "keyword": "slab",
+            "color": "#0080ff"
+        },
+        {
+            "keyword": "lites",
+            "color": "#FFFF00"
+        },
+        {
+            "keyword": "2 Panel",
+            "color": "#ff00ff"
+        },
+        {
+            "keyword": "China",
+            "color": "#0080ff"
+        }
+    ],
+    "selected_company": "Greenfield/Corsi",
+    "delay": "1",
+    "extra_tabs": "0"
+}

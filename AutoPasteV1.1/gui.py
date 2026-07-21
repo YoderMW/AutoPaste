@@ -1,4 +1,7 @@
-from email.contentmanager import raw_data_manager
+import os
+import sys
+import threading
+import time
 
 import ttkbootstrap as ttk
 import keyboard
@@ -6,6 +9,15 @@ import pyperclip
 from ttkbootstrap.scrolled import ScrolledText
 from ttkbootstrap.constants import *
 
+from version import __version__
+from settings import load_settings, save_settings
+from updater import (
+    is_frozen,
+    get_latest_release,
+    is_newer,
+    download_exe,
+    apply_update_and_restart,
+)
 from parsers.gfc_parser import parse_gfc
 from parsers.mavin_parser import parse_mavin
 from parsers.legacy_parser import parse_legacy
@@ -14,6 +26,7 @@ from parsers.white_river_parser import parse_white_river
 from parsers.schwartz_parser import parse_schwartz
 from parsers.dean_parser import parse_dean
 from parsers.dean_s4s_parser import parse_dean_s4s
+from parsers.p_cabinetry_parser import parse_p_cabinetry
 from PDF_Highlighter import build_pdf_highlighter_tab
 from tkinterdnd2 import DND_FILES, TkinterDnD
 from parsers.ruffino_box_parser import parse_ruffino_box
@@ -27,16 +40,44 @@ class App(TkinterDnD.Tk):
         # Apply ttkbootstrap theme
         self.style = ttk.Style("superhero")
 
-        self.title("AutoPaste V1.3")
+        self.title(f"AutoPaste v{__version__}")
+
+        # Load persisted settings before building widgets (load_keywords reads
+        # self.settings["keywords"] while the PDF tab is being constructed).
+        self.settings = load_settings()
+
+        # make_widgets() calls update_widget_visibility(), which rewrites
+        # settings["selected_company"] from the default dropdown value, so grab
+        # the saved company first.
+        saved_company = self.settings["selected_company"]
 
         self.make_widgets()
 
         self.geometry("1052x665")
 
+        # Restore the saved company / delay / extra-tabs into their widgets.
+        self.company_selector.set(saved_company)
+        self.auto_entry_speed.delete("1.0", "end")
+        self.auto_entry_speed.insert("1.0", self.settings["delay"])
+        self.auto_entry_tab_number.set(self.settings["extra_tabs"])
+        self.update_widget_visibility()  # reflect the restored company
+
         self.clipboard_queue = []
         self.clipboard_index = 0
 
+        self._autoentry_thread = None
+        self._autoentry_stop = threading.Event()
+
         keyboard.add_hotkey('F2', lambda: self.after(10, self.paste_and_copy_next))
+        keyboard.add_hotkey('F4', self.toggle_auto_entry)
+        keyboard.add_hotkey('esc', self.stop_auto_entry)
+
+        # Persist delay / extra-tabs / company when the window is closed.
+        self.protocol("WM_DELETE_WINDOW", self.on_close)
+
+        # Check GitHub for a newer release, in the background so a slow or
+        # offline network never delays the window appearing. No-ops from source.
+        self.after(500, self.start_update_check)
 
     def update_current_clipboard_display(self):
         if self.clipboard_queue:
@@ -181,7 +222,8 @@ class App(TkinterDnD.Tk):
                 "Schwartz WW LLC",
                 "Ruffino Boxes",
                 "Dean Cabinetry",
-                "Dean S4S"
+                "Dean S4S",
+                "P Cabinetry"
             ],
             state="readonly",
         )
@@ -381,6 +423,8 @@ class App(TkinterDnD.Tk):
             status, result, message = parse_dean(raw)
         elif company == "Dean S4S":
             status, result, message = parse_dean_s4s(raw)
+        elif company == "P Cabinetry":
+            status, result, message = parse_p_cabinetry(raw)
         else:
             status, result, message = "error", None, "Unknown company selected"
 
@@ -413,16 +457,6 @@ class App(TkinterDnD.Tk):
             self.clipboard_queue.extend(parts)
 
         self.clipboard_index = 0
-
-        # Auto-entry values
-        autoentry_speed = self.auto_entry_speed.get("1.0", "end").strip()
-        autoentry_tab_number = self.auto_entry_tab_number.get()
-
-        with open("parsed_data.txt", "w") as file:
-            file.write(f"{autoentry_speed}\n")
-            file.write(f"{autoentry_tab_number}\n")
-            for item in self.clipboard_queue:
-                file.write(f"{item}\n")
 
         if self.clipboard_queue:
             pyperclip.copy(self.clipboard_queue[0])
@@ -460,6 +494,134 @@ class App(TkinterDnD.Tk):
             flipped_lines.append("\t".join(parts))
 
         return "\n".join(flipped_lines)
+
+    def toggle_auto_entry(self):
+        """F4: start auto-entry when idle, stop it when running (mirrors AHK F4)."""
+        if self._autoentry_thread and self._autoentry_thread.is_alive():
+            self.stop_auto_entry()
+            return
+
+        if not self.clipboard_queue:
+            return
+
+        # Read speed (ms) and extra tabs at start time -- exactly like AHK read
+        # them from parsed_data.txt when F4 was pressed.
+        try:
+            delay_ms = int(self.auto_entry_speed.get("1.0", "end").strip() or "0")
+        except ValueError:
+            delay_ms = 0
+        try:
+            extra_tabs = int(self.auto_entry_tab_number.get() or "0")
+        except ValueError:
+            extra_tabs = 0
+
+        values = list(self.clipboard_queue)  # [qty, w, h, ref, qty, w, h, ref, ...]
+
+        self._autoentry_stop.clear()
+        self._autoentry_thread = threading.Thread(
+            target=self._run_auto_entry,
+            args=(values, delay_ms / 1000.0, extra_tabs),
+            daemon=True,
+        )
+        self._autoentry_thread.start()
+
+    def stop_auto_entry(self):
+        """Esc, or F4 while running: signal the worker to stop."""
+        self._autoentry_stop.set()
+
+    def on_close(self):
+        """Capture current delay / extra-tabs / company, save, then close."""
+        self.settings["selected_company"] = self.company_selector.get()
+        self.settings["delay"] = self.auto_entry_speed.get("1.0", "end").strip()
+        self.settings["extra_tabs"] = self.auto_entry_tab_number.get()
+        save_settings(self.settings)
+        self.destroy()
+
+    def start_update_check(self):
+        """Kick off the GitHub release check on a daemon thread (non-blocking)."""
+        if not is_frozen():
+            return  # running from source: nothing to update
+        threading.Thread(target=self._update_check_worker, daemon=True).start()
+
+    def _update_check_worker(self):
+        """
+        Background: ask GitHub for the latest release. If it's newer, hand the
+        result back to the UI thread to prompt (dialogs must run on the main
+        thread). Silent on any failure (offline, no release, same version).
+        """
+        latest = get_latest_release()
+        if not latest:
+            return
+        tag, asset_url = latest
+        if is_newer(tag):
+            self.after(0, lambda: self._prompt_update(tag, asset_url))
+
+    def _prompt_update(self, tag, asset_url):
+        """UI thread: 'Update available — install now?'. On Yes, do the swap."""
+        from ttkbootstrap.dialogs import Messagebox
+
+        answer = Messagebox.yesno(
+            f"A new version ({tag}) of AutoPaste is available.\n"
+            f"You're on v{__version__}.\n\nInstall it now?",
+            "Update available",
+            parent=self,
+        )
+        if answer != "Yes":
+            return
+
+        # Download beside the running exe so the .bat's move is same-drive/atomic.
+        dest = os.path.join(os.path.dirname(sys.executable), "AutoPaste_new.exe")
+        if not download_exe(asset_url, dest):
+            Messagebox.show_error(
+                "The update failed to download. Please try again later.",
+                "Update failed",
+                parent=self,
+            )
+            return
+
+        if apply_update_and_restart(dest):
+            # Persist settings, then quit so the helper can replace the exe.
+            self.on_close()
+        else:
+            Messagebox.show_error(
+                "The update could not be applied automatically.",
+                "Update failed",
+                parent=self,
+            )
+
+    def _run_auto_entry(self, values, delay, extra_tabs):
+        """
+        Worker thread: type each value then send Tab/Enter in a repeating
+        4-value cycle (qty, width, height, cabinet), matching AutoEntry_V3.ahk.
+        Sends into whatever window currently has focus.
+        """
+        last = len(values) - 1
+        for i, value in enumerate(values):
+            if self._autoentry_stop.is_set():
+                break
+
+            keyboard.write(value)              # AHK: SendText value
+            time.sleep(delay)
+
+            position = i % 4                   # 0=qty 1=width 2=height 3=cabinet
+            if position in (0, 1):
+                keyboard.press_and_release('tab')
+                time.sleep(delay)
+            elif position == 2:
+                keyboard.press_and_release('tab')
+                time.sleep(delay)
+                for _ in range(extra_tabs):
+                    keyboard.press_and_release('tab')
+                    time.sleep(delay)
+            elif position == 3:
+                if i < last:                   # not the final row -> Tab, Tab, Enter
+                    keyboard.press_and_release('tab')
+                    time.sleep(delay)
+                    keyboard.press_and_release('tab')
+                    time.sleep(delay)
+                    keyboard.press_and_release('enter')
+                    time.sleep(delay)
+                # final row: stop cleanly, no trailing keystrokes
 
     def paste_and_copy_next(self):
         """
@@ -567,9 +729,10 @@ class App(TkinterDnD.Tk):
     def update_widget_visibility(self, event=None):
         """Show/hide auto entry widgets based on selected company"""
         company = self.company_selector.get()
+        self.settings["selected_company"] = company  # persist the choice
 
         # Companies that need auto-entry widgets
-        show_autoentry = company in ["Greenfield/Corsi", "Legacy", "MW Residential", "Dean Cabinetry"]
+        show_autoentry = company in ["Greenfield/Corsi", "Legacy", "MW Residential", "Dean Cabinetry", "P Cabinetry"]
 
         if show_autoentry:
             # Show all widgets
