@@ -146,11 +146,24 @@ def apply_update_and_restart(new_exe):
     except OSError:
         return False
 
+    # Scrub PyInstaller's one-file bootstrap variables from the environment the
+    # relaunch inherits. A one-file exe extracts to a temp _MEIxxxx folder and
+    # sets _MEIPASS2 / _PYI_* so its second stage reuses that folder instead of
+    # re-extracting. If the relaunched exe inherits those vars it trusts THIS
+    # process's (about-to-be-deleted) _MEI folder and fails with
+    # "Failed to load Python DLL ... The specified module could not be found."
+    # Removing them forces the new exe to extract its own fresh copy.
+    child_env = os.environ.copy()
+    for key in list(child_env):
+        if key.startswith("_MEIPASS") or key.startswith("_PYI_"):
+            del child_env[key]
+
     DETACHED_PROCESS = 0x00000008
     CREATE_NO_WINDOW = 0x08000000
     try:
         subprocess.Popen(
             ["cmd", "/c", bat_path],
+            env=child_env,
             creationflags=DETACHED_PROCESS | CREATE_NO_WINDOW,
             close_fds=True,
         )
