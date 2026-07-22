@@ -80,9 +80,13 @@ class App(TkinterDnD.Tk):
         # clickable version label (bottom-right of the AutoPaste tab).
         self._pending_update = None
 
+        # Hotkey callbacks fire on the `keyboard` listener thread, so anything
+        # that touches Tk widgets must be marshalled onto the main loop via
+        # after(). (stop_auto_entry only sets a threading.Event, but we wrap it
+        # too for consistency.)
         keyboard.add_hotkey('F2', lambda: self.after(10, self.paste_and_copy_next))
-        keyboard.add_hotkey('F4', self.toggle_auto_entry)
-        keyboard.add_hotkey('esc', self.stop_auto_entry)
+        keyboard.add_hotkey('F4', lambda: self.after(0, self.toggle_auto_entry))
+        keyboard.add_hotkey('esc', lambda: self.after(0, self.stop_auto_entry))
 
         # Persist delay / extra-tabs / company when the window is closed.
         self.protocol("WM_DELETE_WINDOW", self.on_close)
@@ -402,17 +406,6 @@ class App(TkinterDnD.Tk):
             )
         )
 
-        ###########################
-        # HIDE AUTO ENTRY WIDGETS #
-        ###########################
-
-        self.input_textbox.text.bind(
-            "<Button-3>",
-            lambda event: self.input_textbox_menu.tk_popup(
-                event.x_root, event.y_root
-            )
-        )
-
         # Initialize widget visibility
         self.update_widget_visibility()
 
@@ -504,8 +497,9 @@ class App(TkinterDnD.Tk):
 
     def flip_dimensions(self, result: str) -> str:
         """
-        Flips height and width values in parsed output.
-        Expects tab-separated values where columns 2 and 3 are height and width.
+        Swaps the two dimension columns (2 and 3) of each parsed row -- the
+        "Flip H x W" checkbox. Which physical dimension is in which column
+        varies by parser; this just exchanges them.
 
         For example:
         "2\t100\t50\t001" becomes "2\t50\t100\t001"
@@ -515,9 +509,9 @@ class App(TkinterDnD.Tk):
         for line in result.splitlines():
             parts = line.split("\t")
 
-            # Only flip if we have at least 3 tab-separated values (qty, height, width)
+            # Only flip if we have at least 3 tab-separated columns (qty + 2 dims)
             if len(parts) >= 3:
-                # Swap columns 2 and 3 (height and width)
+                # Swap the two dimension columns
                 parts[1], parts[2] = parts[2], parts[1]
 
             flipped_lines.append("\t".join(parts))
@@ -544,7 +538,7 @@ class App(TkinterDnD.Tk):
         except ValueError:
             extra_tabs = 0
 
-        values = list(self.clipboard_queue)  # [qty, w, h, ref, qty, w, h, ref, ...]
+        values = list(self.clipboard_queue)  # [qty, dim, dim, ref, qty, dim, dim, ref, ...]
 
         self._autoentry_stop.clear()
         self._autoentry_thread = threading.Thread(
@@ -671,18 +665,22 @@ class App(TkinterDnD.Tk):
     def _run_auto_entry(self, values, delay, extra_tabs):
         """
         Worker thread: type each value then send Tab/Enter in a repeating
-        4-value cycle (qty, width, height, cabinet), matching AutoEntry_V3.ahk.
-        Sends into whatever window currently has focus.
+        4-column cycle, sending into whatever window currently has focus.
+
+        The cycle is purely positional -- it types the parser's columns in the
+        order they were produced (qty, dim, dim, ref) and never cares which
+        physical dimension is in which column, so parsers are free to emit
+        height/width in whatever order their target form expects.
         """
         last = len(values) - 1
         for i, value in enumerate(values):
             if self._autoentry_stop.is_set():
                 break
 
-            keyboard.write(value)              # AHK: SendText value
+            keyboard.write(value)              # type the current column's value
             time.sleep(delay)
 
-            position = i % 4                   # 0=qty 1=width 2=height 3=cabinet
+            position = i % 4                   # 0=qty 1=dim 2=dim 3=ref
             if position in (0, 1):
                 keyboard.press_and_release('tab')
                 time.sleep(delay)

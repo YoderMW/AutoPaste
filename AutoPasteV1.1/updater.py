@@ -118,15 +118,24 @@ def apply_update_and_restart(new_exe):
         return False
 
     current_exe = sys.executable  # the running AutoPaste.exe
+    backup_exe = current_exe + ".bak"
     bat_path = os.path.join(tempfile.gettempdir(), "autopaste_update.bat")
 
-    # ping = a portable ~2s sleep so the parent has time to fully exit before we
-    # try to delete its exe. Quoting guards paths with spaces.
+    # Safe swap: rename the running exe aside (don't delete it), move the new
+    # one into place, and only then discard the backup. If the move fails for
+    # any reason, restore the backup so the user is never left without a working
+    # exe. ping = a portable ~2s sleep so the parent fully exits before we touch
+    # its file; quoting guards paths with spaces.
     script = (
         "@echo off\r\n"
         "ping 127.0.0.1 -n 3 >nul\r\n"
-        f'del "{current_exe}"\r\n'
+        f'move /y "{current_exe}" "{backup_exe}" >nul\r\n'
         f'move /y "{new_exe}" "{current_exe}" >nul\r\n'
+        "if errorlevel 1 (\r\n"
+        f'    move /y "{backup_exe}" "{current_exe}" >nul\r\n'
+        ") else (\r\n"
+        f'    del "{backup_exe}" >nul 2>&1\r\n'
+        ")\r\n"
         f'start "" "{current_exe}"\r\n'
         'del "%~f0"\r\n'
     )

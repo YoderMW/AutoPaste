@@ -10,12 +10,56 @@ REF_ID_PATTERN = re.compile(
 )
 
 
+def _is_record_start(line: str) -> bool:
+    """
+    True if `line` begins a new record: a whole-number quantity followed
+    somewhere by a standalone "x" dimension separator (e.g. "1 17 7/8 x ...").
+
+    Continuation/junk lines ("3 1/4 : 3 1/4 Blum 5mm", "3/4 (All) 130",
+    "no hinges", "2 1/4 (All) 109") never match, so they get folded into the
+    record above them.
+    """
+    parts = line.split()
+    if not parts or not parts[0].isdigit():
+        return False
+    return "x" in (p.lower() for p in parts)
+
+
+def _regroup_records(raw_text: str) -> list[str]:
+    """
+    Reassemble line-wrapped records into single logical lines.
+
+    Some PDF viewers copy a Dean record onto one line; others wrap it across
+    several. Joining each record's fragments back together yields exactly the
+    single-line format, so the rest of the parser can stay format-agnostic.
+
+    A new record begins at each `_is_record_start` line; every following line
+    that isn't itself a record start is appended to it. Stray lines before the
+    first record start (headers/junk) are dropped.
+    """
+    records: list[str] = []
+    for line in raw_text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        if _is_record_start(line):
+            records.append(line)
+        elif records:
+            records[-1] += " " + line
+        # else: orphan line before any record start -> drop silently
+    return records
+
+
 def parse_dean(raw_text: str) -> tuple[str, str | None, str | None]:
     """
     Parse Dean input data format.
 
-    Expected format (per line):
+    Each record is one logical line:
         [qty] [width] x [height] [junk...] [ref_id]
+
+    Some PDF viewers wrap that record across several physical lines; a
+    pre-pass (_regroup_records) reassembles those back into one line so both
+    layouts parse identically.
 
     Examples:
         1 21 5/16 x 19 7/16 P L 2.00 3 1/4 : 3 1/4 Blum 5mm 2 1/4 (All) 122
@@ -27,11 +71,8 @@ def parse_dean(raw_text: str) -> tuple[str, str | None, str | None]:
     """
     output_lines = []
 
-    for line_number, line in enumerate(raw_text.splitlines(), start=1):
-        line = line.strip()
-
-        if not line:
-            continue
+    for line_number, line in enumerate(_regroup_records(raw_text), start=1):
+        # Lines are already stripped and non-empty from _regroup_records.
 
         # --------------------------
         # Extract REF ID from end of line
