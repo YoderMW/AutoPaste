@@ -15,6 +15,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import urllib.parse
 import urllib.request
 
 from version import __version__
@@ -22,7 +23,12 @@ from version import __version__
 # The public repo the releases are published to.
 REPO = "YoderMW/AutoPaste"
 LATEST_RELEASE_URL = f"https://api.github.com/repos/{REPO}/releases/latest"
+COMPARE_URL = f"https://api.github.com/repos/{REPO}/compare/{{base}}...{{head}}"
 ASSET_NAME = "AutoPaste.exe"
+
+# Cap on how many commit subjects a changelog popup will list, in case someone
+# updates from a very old version.
+MAX_CHANGELOG_ENTRIES = 50
 
 # Short so a slow/blocked network can't stall launch for long.
 HTTP_TIMEOUT = 5
@@ -48,6 +54,67 @@ def _version_tuple(text):
 def is_newer(latest_tag, current=__version__):
     """True if latest_tag represents a strictly higher version than current."""
     return _version_tuple(latest_tag) > _version_tuple(current)
+
+
+def is_same_version(a, b):
+    """True if two version/tag strings name the same version ('v2.0.4' == '2.0.4')."""
+    return _version_tuple(a) == _version_tuple(b)
+
+
+def _tag_for_version(version, like_tag):
+    """
+    Render `version` as a tag using the same 'v' prefix style as `like_tag`.
+
+    We know the version we're updating FROM (version.py) but not the tag it was
+    released under, so we mirror the new tag's convention: ('2.0.3', 'v2.0.4')
+    -> 'v2.0.3'.
+    """
+    prefix = "v" if like_tag[:1] in ("v", "V") else ""
+    return prefix + version.lstrip("vV").strip()
+
+
+def get_changelog(from_version, to_tag, max_entries=MAX_CHANGELOG_ENTRIES):
+    """
+    Return the commit subject lines landed between the release for from_version
+    and to_tag, newest first, for use as a simple change log.
+
+    Returns [] on any problem (offline, rate-limited, unknown tag) -- callers
+    treat an empty list as "no details available" rather than an error. Never
+    raises.
+    """
+    base = _tag_for_version(from_version, to_tag)
+    url = COMPARE_URL.format(
+        base=urllib.parse.quote(base, safe=""),
+        head=urllib.parse.quote(to_tag, safe=""),
+    )
+
+    try:
+        req = urllib.request.Request(
+            url,
+            headers={
+                "Accept": "application/vnd.github+json",
+                "User-Agent": "AutoPaste-Updater",
+            },
+        )
+        with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except Exception:
+        return []  # offline / 404 on an untagged version / rate-limited
+
+    subjects = []
+    for entry in data.get("commits", []):
+        message = ((entry.get("commit") or {}).get("message") or "").strip()
+        if not message:
+            continue
+        subject = message.splitlines()[0].strip()
+        # Merge commits are plumbing, not changes worth showing a user.
+        if not subject or subject.lower().startswith("merge "):
+            continue
+        subjects.append(subject)
+
+    # The compare API returns oldest-first; newest change reads better on top.
+    subjects.reverse()
+    return subjects[:max_entries]
 
 
 def get_latest_release():

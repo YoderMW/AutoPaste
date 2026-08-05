@@ -16,9 +16,12 @@ from updater import (
     is_frozen,
     get_latest_release,
     is_newer,
+    is_same_version,
+    get_changelog,
     download_exe,
     apply_update_and_restart,
 )
+from changelog import show_changelog_window
 from parsers.gfc_parser import parse_gfc
 from parsers.mavin_parser import parse_mavin
 from parsers.legacy_parser import parse_legacy
@@ -27,6 +30,7 @@ from parsers.white_river_parser import parse_white_river
 from parsers.schwartz_parser import parse_schwartz
 from parsers.dean_parser import parse_dean
 from parsers.dean_s4s_parser import parse_dean_s4s
+from parsers.dean_boxes_parser import parse_dean_boxes
 from parsers.p_cabinetry_parser import parse_p_cabinetry
 from PDF_Highlighter import build_pdf_highlighter_tab
 from tkinterdnd2 import DND_FILES, TkinterDnD
@@ -72,6 +76,7 @@ class App(TkinterDnD.Tk):
 
         self.clipboard_queue = []
         self.clipboard_index = 0
+        self.columns_per_row = 4  # per-row column count for F4 auto-entry
 
         self._autoentry_thread = None
         self._autoentry_stop = threading.Event()
@@ -90,6 +95,10 @@ class App(TkinterDnD.Tk):
 
         # Persist delay / extra-tabs / company when the window is closed.
         self.protocol("WM_DELETE_WINDOW", self.on_close)
+
+        # If the previous run installed an update, show what changed. Runs
+        # before the update check so the two dialogs can't collide.
+        self.after(200, self.show_pending_changelog)
 
         # Check GitHub for a newer release, in the background so a slow or
         # offline network never delays the window appearing. No-ops from source.
@@ -239,6 +248,7 @@ class App(TkinterDnD.Tk):
                 "Ruffino Boxes",
                 "Dean Cabinetry",
                 "Dean S4S",
+                "Dean Boxes",
                 "Peters Cabinetry"
             ],
             state="readonly",
@@ -445,6 +455,8 @@ class App(TkinterDnD.Tk):
             status, result, message = parse_dean(raw)
         elif company == "Dean S4S":
             status, result, message = parse_dean_s4s(raw)
+        elif company == "Dean Boxes":
+            status, result, message = parse_dean_boxes(raw)
         elif company == "Peters Cabinetry":
             status, result, message = parse_p_cabinetry(raw)
         else:
@@ -474,9 +486,17 @@ class App(TkinterDnD.Tk):
 
         # Build clipboard queue
         self.clipboard_queue = []
+        self.columns_per_row = 4  # default; overwritten from the first row below
         for line in result.splitlines():
             parts = line.split("\t")
             self.clipboard_queue.extend(parts)
+
+        # F4 auto-entry tabs in a per-row cycle, so it needs to know how many
+        # columns each parsed row has (4 for most parsers, 5 for the box parsers
+        # that emit qty/height/width/depth/ref).
+        first_row = result.splitlines()[0] if result.splitlines() else ""
+        if first_row:
+            self.columns_per_row = len(first_row.split("\t"))
 
         self.clipboard_index = 0
 
@@ -543,7 +563,7 @@ class App(TkinterDnD.Tk):
         self._autoentry_stop.clear()
         self._autoentry_thread = threading.Thread(
             target=self._run_auto_entry,
-            args=(values, delay_ms / 1000.0, extra_tabs),
+            args=(values, delay_ms / 1000.0, extra_tabs, self.columns_per_row),
             daemon=True,
         )
         self._autoentry_thread.start()
@@ -559,6 +579,30 @@ class App(TkinterDnD.Tk):
         self.settings["extra_tabs"] = self.auto_entry_tab_number.get()
         save_settings(self.settings)
         self.destroy()
+
+    def show_pending_changelog(self):
+        """
+        If the last run installed an update, pop the "what's new" window once.
+
+        The entry is written by _prompt_update() just before the restart and is
+        consumed here: cleared and saved immediately, so a later crash can't
+        make it reappear.
+        """
+        pending = self.settings.pop("pending_changelog", None)
+        if not pending:
+            return
+        save_settings(self.settings)
+
+        # If the exe swap failed, the .bat restores the old exe and we're still
+        # running the version we started from -- the note would be a lie, so
+        # drop it (it's already been cleared above).
+        to_tag = pending.get("to") or ""
+        if not is_same_version(to_tag, __version__):
+            return
+
+        show_changelog_window(
+            self, pending.get("from"), to_tag, pending.get("entries") or []
+        )
 
     def start_update_check(self, auto_prompt=True):
         """
@@ -652,7 +696,20 @@ class App(TkinterDnD.Tk):
             )
             return
 
+        # Collect the change log now, while we still know the network works and
+        # still know which version we're coming FROM. The next launch only has
+        # to display it. Best-effort: [] just means the popup says nothing is
+        # available, never that the update failed.
+        entries = get_changelog(__version__, tag)
+
         if apply_update_and_restart(dest):
+            # Stashed here rather than shown now -- the point is to greet the
+            # user on the other side of the restart. on_close() saves settings.
+            self.settings["pending_changelog"] = {
+                "from": __version__,
+                "to": tag,
+                "entries": entries,
+            }
             # Persist settings, then quit so the helper can replace the exe.
             self.on_close()
         else:
@@ -662,15 +719,20 @@ class App(TkinterDnD.Tk):
                 parent=self,
             )
 
-    def _run_auto_entry(self, values, delay, extra_tabs):
+    def _run_auto_entry(self, values, delay, extra_tabs, ncols=4):
         """
         Worker thread: type each value then send Tab/Enter in a repeating
-        4-column cycle, sending into whatever window currently has focus.
+        `ncols`-column cycle, sending into whatever window currently has focus.
 
         The cycle is purely positional -- it types the parser's columns in the
-        order they were produced (qty, dim, dim, ref) and never cares which
+        order they were produced (qty, dims..., ref) and never cares which
         physical dimension is in which column, so parsers are free to emit
         height/width in whatever order their target form expects.
+
+        Each row is: qty, then (ncols - 2) dimension columns, then ref. So the
+        last dimension sits at position ncols-2 and the ref at ncols-1. With
+        ncols=4 this is identical to the original qty/dim/dim/ref behavior; the
+        5-column box parsers (qty/height/width/depth/ref) reuse the same logic.
         """
         last = len(values) - 1
         for i, value in enumerate(values):
@@ -680,17 +742,8 @@ class App(TkinterDnD.Tk):
             keyboard.write(value)              # type the current column's value
             time.sleep(delay)
 
-            position = i % 4                   # 0=qty 1=dim 2=dim 3=ref
-            if position in (0, 1):
-                keyboard.press_and_release('tab')
-                time.sleep(delay)
-            elif position == 2:
-                keyboard.press_and_release('tab')
-                time.sleep(delay)
-                for _ in range(extra_tabs):
-                    keyboard.press_and_release('tab')
-                    time.sleep(delay)
-            elif position == 3:
+            position = i % ncols               # 0=qty ... ncols-2=last dim, ncols-1=ref
+            if position == ncols - 1:          # ref (final column of the row)
                 if i < last:                   # not the final row -> Tab, Tab, Enter
                     keyboard.press_and_release('tab')
                     time.sleep(delay)
@@ -699,6 +752,15 @@ class App(TkinterDnD.Tk):
                     keyboard.press_and_release('enter')
                     time.sleep(delay)
                 # final row: stop cleanly, no trailing keystrokes
+            elif position == ncols - 2:        # last dimension before the ref
+                keyboard.press_and_release('tab')
+                time.sleep(delay)
+                for _ in range(extra_tabs):
+                    keyboard.press_and_release('tab')
+                    time.sleep(delay)
+            else:                              # qty or a middle dimension
+                keyboard.press_and_release('tab')
+                time.sleep(delay)
 
     def paste_and_copy_next(self):
         """
@@ -809,7 +871,7 @@ class App(TkinterDnD.Tk):
         self.settings["selected_company"] = company  # persist the choice
 
         # Companies that need auto-entry widgets
-        show_autoentry = company in ["Greenfield/Corsi", "Legacy", "MW Residential", "Dean Cabinetry", "Peters Cabinetry"]
+        show_autoentry = company in ["Greenfield/Corsi", "Legacy", "MW Residential", "Dean Cabinetry", "Peters Cabinetry", "Dean Boxes", "Ruffino Boxes"]
 
         if show_autoentry:
             # Show all widgets
